@@ -168,7 +168,9 @@ var Answers4Rank = []; //用于排序的答案列表
 var AnswersScores = {}; // 玩家答案分数
 var GameState = GS.Idle; // 游戏状态
 var CurrentRound = 0; // 当前回合数
-var questionPool = allQuestions.slice(); // 问题池（独立副本，池子耗尽自动补满）
+var questionPool = []; // 问题池（去重后填充，池子耗尽自动补满）
+var lastQuestion = null; // 上一题（避免池子补满瞬间又抽到同一题）
+var sessionUsedQuestions = new Set(); // 本场活动已出过的题（跨局去重，整库抢空才重置）
 var question = null; // 当前问题
 
 var CountingDownInterval = null; // 倒计时定时器
@@ -183,9 +185,28 @@ function resetAudiencesRating() {
     AudiencesRating = {};
 }
 
-function resetQuestions() {
-    questionPool = allQuestions.slice();
+function buildQuestionPool() {
+    // 按"去掉所有空白"后的文本判重，只保留首次出现的题目：
+    // 题库里手滑写重复的题不会在同一轮里被抽到两次。
+    const seen = {};
+    const pool = [];
+    for (var i = 0; i < allQuestions.length; i++) {
+        const q = String(allQuestions[i]).trim();
+        if (q === "") continue;
+        const key = q.replace(/\s+/g, "");
+        if (seen[key]) continue;
+        seen[key] = true;
+        pool.push(q);
+    }
+    questionPool = pool;
 }
+
+function resetQuestions() {
+    // 只重建题池；sessionUsedQuestions 跨局保留，实现"整场活动不重复出题"
+    buildQuestionPool();
+}
+
+buildQuestionPool(); // 脚本加载时先把池子填好
 
 function resetAnswers() {
     PlayersAnswers = {};
@@ -210,11 +231,23 @@ function getPlayers() {
 
 function chooseQuestion() {
     if (questionPool.length === 0) {
-        questionPool = allQuestions.slice(); // 池子耗尽自动补满
+        buildQuestionPool(); // 池子耗尽自动补满
     }
-    var idx = Math.floor(Math.random() * questionPool.length);
-    question = questionPool[idx];
-    questionPool.splice(idx, 1); // 移除已出题目
+    // 跨局去重：本场活动已出过的题不再抽；整库抢空后才清空记录重新开始
+    var fresh = questionPool.filter(q => !sessionUsedQuestions.has(q));
+    if (fresh.length === 0) {
+        sessionUsedQuestions.clear();
+        fresh = questionPool.slice();
+        log("🔄 题库已全部出过一轮，重新开始洗牌");
+    }
+    // 候选里排除上一题：整库重置的瞬间不会紧接着又抽到同一题
+    var candidates = (fresh.length > 1)
+        ? fresh.filter(q => q !== lastQuestion)
+        : fresh;
+    question = candidates[Math.floor(Math.random() * candidates.length)];
+    lastQuestion = question;
+    sessionUsedQuestions.add(question);
+    questionPool.splice(questionPool.indexOf(question), 1); // 移除已出题目
     return updateQuestionInDocument();
 }
 
@@ -555,7 +588,7 @@ function getAudienceRate(text) {
 }
 
 function audienceRate(danmaku) {
-    if (danmaku.sender in Players) return; // 玩家不能评分
+    if (Players.includes(danmaku.sender)) return; // 玩家（选手）不能评分
     if (String(danmaku.text).trim() === "0") { // 发送 0 取消投票（数字 0 同样有效）
         delete AudiencesRating[danmaku.sender];
         updateAnswersScores();
